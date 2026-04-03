@@ -1,3 +1,4 @@
+import dns from 'dns';
 import https from 'https';
 import { Api, Bot } from 'grammy';
 
@@ -56,7 +57,13 @@ export class TelegramChannel implements Channel {
   async connect(): Promise<void> {
     this.bot = new Bot(this.botToken, {
       client: {
-        baseFetchConfig: { agent: https.globalAgent, compress: true },
+        baseFetchConfig: {
+          agent: new https.Agent({
+            lookup: (hostname, options, callback) =>
+              dns.lookup(hostname, { ...options, family: 4 }, callback),
+          }),
+          compress: true,
+        },
       },
     });
 
