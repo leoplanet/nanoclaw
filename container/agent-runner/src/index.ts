@@ -472,7 +472,6 @@ async function runQuery(
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
       mcpServers: {
         nanoclaw: {
@@ -676,7 +675,6 @@ async function main(): Promise<void> {
           allowedTools: [],
           env: sdkEnv,
           permissionMode: 'bypassPermissions' as const,
-          allowDangerouslySkipPermissions: true,
           settingSources: ['project', 'user'] as const,
           hooks: {
             PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],

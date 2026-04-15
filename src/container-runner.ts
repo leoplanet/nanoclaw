@@ -268,12 +268,12 @@ async function buildContainerArgs(
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 
-  // Run as host user so bind-mounted files are accessible.
-  // Skip when running as root (uid 0), as the container's node user (uid 1000),
-  // or when getuid is unavailable (native Windows without WSL).
+  // Run as host user so bind-mounted files are accessible and claude runs as
+  // non-root (required: --dangerously-skip-permissions is blocked for root).
+  // Skip only when running as root (uid 0) or when getuid is unavailable.
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
+  if (hostUid != null && hostUid !== 0) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
   }
@@ -309,7 +309,11 @@ export async function runContainerAgent(
   const agentIdentifier = input.isMain
     ? undefined
     : group.folder.toLowerCase().replace(/_/g, '-');
-  const containerArgs = await buildContainerArgs(mounts, containerName, agentIdentifier);
+  const containerArgs = await buildContainerArgs(
+    mounts,
+    containerName,
+    agentIdentifier,
+  );
 
   logger.debug(
     {
