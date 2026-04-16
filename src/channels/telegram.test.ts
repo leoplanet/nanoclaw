@@ -710,6 +710,169 @@ describe('TelegramChannel', () => {
     });
   });
 
+  // --- Attachment downloads ---
+
+  describe('attachment downloads', () => {
+    it('includes container path in document placeholder when download succeeds', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      // Spy on the private downloader so we don't touch fs/network.
+      vi.spyOn(channel as any, 'downloadAttachment').mockResolvedValue(
+        '/workspace/group/attachments/1713000000_report.pdf',
+      );
+
+      const ctx = createMediaCtx({
+        extra: {
+          document: { file_id: 'FILE_ID_123', file_name: 'report.pdf' },
+        },
+      });
+      await triggerMediaMessage('message:document', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content:
+            '[Document: report.pdf — saved to /workspace/group/attachments/1713000000_report.pdf]',
+        }),
+      );
+    });
+
+    it('passes file_id, preferred name, and group folder to downloader', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const spy = vi
+        .spyOn(channel as any, 'downloadAttachment')
+        .mockResolvedValue('/workspace/group/attachments/x.pdf');
+
+      const ctx = createMediaCtx({
+        extra: {
+          document: { file_id: 'FILE_ID_456', file_name: 'notes.pdf' },
+        },
+      });
+      await triggerMediaMessage('message:document', ctx);
+
+      expect(spy).toHaveBeenCalledWith('FILE_ID_456', 'notes.pdf', 'test-group');
+    });
+
+    it('falls back to bare placeholder when download fails', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      vi.spyOn(channel as any, 'downloadAttachment').mockRejectedValue(
+        new Error('File too big'),
+      );
+
+      const ctx = createMediaCtx({
+        extra: {
+          document: { file_id: 'FILE_ID_789', file_name: 'huge.zip' },
+        },
+      });
+      await triggerMediaMessage('message:document', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ content: '[Document: huge.zip]' }),
+      );
+    });
+
+    it('downloads largest photo size and annotates with container path', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const spy = vi
+        .spyOn(channel as any, 'downloadAttachment')
+        .mockResolvedValue('/workspace/group/attachments/photo.jpg');
+
+      const ctx = createMediaCtx({
+        messageId: 42,
+        extra: {
+          photo: [
+            { file_id: 'small' },
+            { file_id: 'medium' },
+            { file_id: 'large' },
+          ],
+        },
+      });
+      await triggerMediaMessage('message:photo', ctx);
+
+      expect(spy).toHaveBeenCalledWith('large', 'photo_42.jpg', 'test-group');
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content: '[Photo — saved to /workspace/group/attachments/photo.jpg]',
+        }),
+      );
+    });
+
+    it('preserves caption when download annotates placeholder', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      vi.spyOn(channel as any, 'downloadAttachment').mockResolvedValue(
+        '/workspace/group/attachments/photo.jpg',
+      );
+
+      const ctx = createMediaCtx({
+        caption: 'look at this',
+        extra: { photo: [{ file_id: 'only' }] },
+      });
+      await triggerMediaMessage('message:photo', ctx);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({
+          content:
+            '[Photo — saved to /workspace/group/attachments/photo.jpg] look at this',
+        }),
+      );
+    });
+
+    it('does not call downloader for documents without file_id', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const spy = vi.spyOn(channel as any, 'downloadAttachment');
+
+      const ctx = createMediaCtx({
+        extra: { document: { file_name: 'report.pdf' } },
+      });
+      await triggerMediaMessage('message:document', ctx);
+
+      expect(spy).not.toHaveBeenCalled();
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'tg:100200300',
+        expect.objectContaining({ content: '[Document: report.pdf]' }),
+      );
+    });
+
+    it('does not call downloader for unregistered chats', async () => {
+      const opts = createTestOpts();
+      const channel = new TelegramChannel('test-token', opts);
+      await channel.connect();
+
+      const spy = vi.spyOn(channel as any, 'downloadAttachment');
+
+      const ctx = createMediaCtx({
+        chatId: 999999,
+        extra: {
+          document: { file_id: 'FILE_ID', file_name: 'x.pdf' },
+        },
+      });
+      await triggerMediaMessage('message:document', ctx);
+
+      expect(spy).not.toHaveBeenCalled();
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+  });
+
   // --- sendMessage ---
 
   describe('sendMessage', () => {

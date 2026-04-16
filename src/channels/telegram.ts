@@ -1,8 +1,10 @@
 import dns from 'dns';
+import fs from 'fs';
 import https from 'https';
+import path from 'path';
 import { Api, Bot } from 'grammy';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, GROUPS_DIR, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -12,6 +14,17 @@ import {
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
+
+// Mount point inside container for the group folder. Must match
+// container-runner.ts containerPath for the group mount.
+const CONTAINER_GROUP_PATH = '/workspace/group';
+const ATTACHMENTS_SUBDIR = 'attachments';
+
+// Replace unsafe filename chars with underscore; cap length.
+function sanitizeFileName(name: string): string {
+  const cleaned = name.replace(/[^a-zA-Z0-9._-]+/g, '_');
+  return cleaned.slice(0, 120) || 'file';
+}
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
@@ -48,6 +61,12 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
+  // IPv4-only HTTPS agent — reused for the bot client and for file downloads,
+  // since the server has no IPv6 and Telegram's AAAA lookups would hang.
+  private ipv4Agent: https.Agent = new https.Agent({
+    lookup: (hostname, options, callback) =>
+      dns.lookup(hostname, { ...options, family: 4 }, callback),
+  });
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
@@ -58,10 +77,7 @@ export class TelegramChannel implements Channel {
     this.bot = new Bot(this.botToken, {
       client: {
         baseFetchConfig: {
-          agent: new https.Agent({
-            lookup: (hostname, options, callback) =>
-              dns.lookup(hostname, { ...options, family: 4 }, callback),
-          }),
+          agent: this.ipv4Agent,
           compress: true,
         },
       },
@@ -174,8 +190,9 @@ export class TelegramChannel implements Channel {
       );
     });
 
-    // Handle non-text messages with placeholders so the agent knows something was sent
-    const storeNonText = (ctx: any, placeholder: string) => {
+    // Helper: emit a non-text message with a placeholder (and optional
+    // downloaded-attachment annotation) so the agent knows something was sent.
+    const emitNonText = (ctx: any, placeholder: string) => {
       const chatJid = `tg:${ctx.chat.id}`;
       const group = this.opts.registeredGroups()[chatJid];
       if (!group) return;
@@ -208,20 +225,103 @@ export class TelegramChannel implements Channel {
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
-    this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
-    this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
-    this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
-    this.bot.on('message:document', (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      storeNonText(ctx, `[Document: ${name}]`);
+    // Download the Telegram file for `fileId`, save it under the group's
+    // attachments/ directory, and return a placeholder string that includes
+    // the in-container path so the agent can Read it. Falls back to the
+    // bare placeholder if the download fails (e.g., >20MB files are not
+    // accessible via the bot API, or no file_id is present).
+    const withDownload = async (
+      ctx: any,
+      label: string,
+      fileId: string | undefined,
+      preferredName: string,
+    ): Promise<string> => {
+      const bare = `[${label}]`;
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group || !fileId) return bare;
+
+      try {
+        const containerPath = await this.downloadAttachment(
+          fileId,
+          preferredName,
+          group.folder,
+        );
+        if (!containerPath) return bare;
+        return `[${label} — saved to ${containerPath}]`;
+      } catch (err) {
+        logger.error(
+          { err, fileId, groupFolder: group.folder },
+          'Failed to download Telegram attachment',
+        );
+        return bare;
+      }
+    };
+
+    this.bot.on('message:photo', async (ctx) => {
+      // Photos are an array of sizes, smallest→largest. Use the largest.
+      const photo = ctx.message.photo?.[ctx.message.photo.length - 1];
+      const preferred = `photo_${ctx.message.message_id}.jpg`;
+      const placeholder = await withDownload(
+        ctx,
+        'Photo',
+        photo?.file_id,
+        preferred,
+      );
+      emitNonText(ctx, placeholder);
+    });
+    this.bot.on('message:video', async (ctx) => {
+      const vid = ctx.message.video;
+      const preferred =
+        vid?.file_name || `video_${ctx.message.message_id}.mp4`;
+      const placeholder = await withDownload(
+        ctx,
+        'Video',
+        vid?.file_id,
+        preferred,
+      );
+      emitNonText(ctx, placeholder);
+    });
+    this.bot.on('message:voice', async (ctx) => {
+      const voice = ctx.message.voice;
+      const preferred = `voice_${ctx.message.message_id}.ogg`;
+      const placeholder = await withDownload(
+        ctx,
+        'Voice message',
+        voice?.file_id,
+        preferred,
+      );
+      emitNonText(ctx, placeholder);
+    });
+    this.bot.on('message:audio', async (ctx) => {
+      const audio = ctx.message.audio;
+      const preferred =
+        audio?.file_name || `audio_${ctx.message.message_id}.mp3`;
+      const placeholder = await withDownload(
+        ctx,
+        'Audio',
+        audio?.file_id,
+        preferred,
+      );
+      emitNonText(ctx, placeholder);
+    });
+    this.bot.on('message:document', async (ctx) => {
+      const doc = ctx.message.document;
+      const fileName = doc?.file_name || 'file';
+      const placeholder = await withDownload(
+        ctx,
+        `Document: ${fileName}`,
+        doc?.file_id,
+        fileName,
+      );
+      emitNonText(ctx, placeholder);
     });
     this.bot.on('message:sticker', (ctx) => {
       const emoji = ctx.message.sticker?.emoji || '';
-      storeNonText(ctx, `[Sticker ${emoji}]`);
+      emitNonText(ctx, `[Sticker ${emoji}]`);
     });
-    this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
-    this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
+    this.bot.on('message:location', (ctx) => emitNonText(ctx, '[Location]'));
+    this.bot.on('message:contact', (ctx) => emitNonText(ctx, '[Contact]'));
 
     // Handle errors gracefully
     this.bot.catch((err) => {
@@ -244,6 +344,73 @@ export class TelegramChannel implements Channel {
         },
       });
     });
+  }
+
+  /**
+   * Resolves `fileId` via Telegram's getFile endpoint, downloads the resulting
+   * file into `groups/<groupFolder>/attachments/`, and returns the in-container
+   * path (e.g. `/workspace/group/attachments/<ts>_<name>`) where the agent can
+   * Read it. Returns null if the download can't be completed.
+   *
+   * Telegram's Bot API only serves files up to 20MB; larger files cannot be
+   * downloaded this way and will return null.
+   */
+  private async downloadAttachment(
+    fileId: string,
+    preferredName: string,
+    groupFolder: string,
+  ): Promise<string | null> {
+    if (!this.bot) return null;
+
+    // Ask Telegram for the server-side file path.
+    const file = await this.bot.api.getFile(fileId);
+    if (!file.file_path) {
+      logger.warn({ fileId }, 'Telegram getFile returned no file_path');
+      return null;
+    }
+
+    // Build a safe local filename, preferring the server-side extension.
+    const serverExt = path.extname(file.file_path);
+    const preferredExt = path.extname(preferredName);
+    const ext = serverExt || preferredExt || '';
+    const baseNoExt = path.basename(preferredName, preferredExt) || 'file';
+    const safeBase = sanitizeFileName(baseNoExt);
+    const fileName = `${Date.now()}_${safeBase}${ext}`;
+
+    const attachmentsDir = path.join(
+      GROUPS_DIR,
+      groupFolder,
+      ATTACHMENTS_SUBDIR,
+    );
+    fs.mkdirSync(attachmentsDir, { recursive: true });
+    const hostPath = path.join(attachmentsDir, fileName);
+
+    const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+
+    await new Promise<void>((resolve, reject) => {
+      const req = https.get(url, { agent: this.ipv4Agent }, (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          reject(
+            new Error(`Telegram file download HTTP ${res.statusCode}`),
+          );
+          return;
+        }
+        const out = fs.createWriteStream(hostPath);
+        res.pipe(out);
+        out.on('finish', () => out.close(() => resolve()));
+        out.on('error', (e) => {
+          fs.unlink(hostPath, () => reject(e));
+        });
+      });
+      req.on('error', reject);
+    });
+
+    logger.info(
+      { hostPath, fileId, bytes: fs.statSync(hostPath).size },
+      'Downloaded Telegram attachment',
+    );
+    return `${CONTAINER_GROUP_PATH}/${ATTACHMENTS_SUBDIR}/${fileName}`;
   }
 
   async sendMessage(

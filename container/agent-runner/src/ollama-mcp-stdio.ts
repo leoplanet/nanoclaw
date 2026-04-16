@@ -88,7 +88,7 @@ server.tool(
 
 server.tool(
   'ollama_generate',
-  'Send a prompt to a local Ollama model and get a response. Good for cheaper/faster tasks like summarization, translation, or general queries. Use ollama_list_models first to see available models.',
+  'Send a prompt to a local Ollama model and get a response. Good for cheaper/faster tasks like summarization, translation, or general queries. Keep to models <=13B for interactive use — anything larger (26B+) runs ~10 tok/s on this host and will time out in real-time flows; reserve large models for scheduled/background tasks. Use ollama_list_models first to see available models.',
   {
     model: z.string().describe('The model name (e.g., "llama3.2", "mistral", "gemma2")'),
     prompt: z.string().describe('The prompt to send to the model'),
