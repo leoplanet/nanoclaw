@@ -755,7 +755,11 @@ describe('TelegramChannel', () => {
       });
       await triggerMediaMessage('message:document', ctx);
 
-      expect(spy).toHaveBeenCalledWith('FILE_ID_456', 'notes.pdf', 'test-group');
+      expect(spy).toHaveBeenCalledWith(
+        'FILE_ID_456',
+        'notes.pdf',
+        'test-group',
+      );
     });
 
     it('falls back to bare placeholder when download fails', async () => {

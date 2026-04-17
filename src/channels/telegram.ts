@@ -272,8 +272,7 @@ export class TelegramChannel implements Channel {
     });
     this.bot.on('message:video', async (ctx) => {
       const vid = ctx.message.video;
-      const preferred =
-        vid?.file_name || `video_${ctx.message.message_id}.mp4`;
+      const preferred = vid?.file_name || `video_${ctx.message.message_id}.mp4`;
       const placeholder = await withDownload(
         ctx,
         'Video',
@@ -391,9 +390,7 @@ export class TelegramChannel implements Channel {
       const req = https.get(url, { agent: this.ipv4Agent }, (res) => {
         if (res.statusCode !== 200) {
           res.resume();
-          reject(
-            new Error(`Telegram file download HTTP ${res.statusCode}`),
-          );
+          reject(new Error(`Telegram file download HTTP ${res.statusCode}`));
           return;
         }
         const out = fs.createWriteStream(hostPath);
